@@ -1,0 +1,44 @@
+{
+  "name": "hd-scanner",
+  "version": "1.0.0",
+  "description": "A free, open-source disk space analyzer with treemap visualization",
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "start": "electron-vite preview",
+    "test": "vitest run"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/photonn/hd-scanner.git"
+  },
+  "keywords": [
+    "disk",
+    "scanner",
+    "treemap",
+    "electron"
+  ],
+  "author": "",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/photonn/hd-scanner/issues"
+  },
+  "homepage": "https://github.com/photonn/hd-scanner#readme",
+  "devDependencies": {
+    "@types/node": "^26.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
+    "electron": "^42.4.1",
+    "electron-vite": "^5.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.16",
+    "vitest": "^3.2.6"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  }
+}
