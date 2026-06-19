@@ -105,16 +105,34 @@ export interface FolderNode {
 
 // ── Exclude pattern matching ─────────────────────────────────────────────────
 // Supports plain names ("node_modules") and simple "*" wildcards ("*.cache").
-function isExcluded(name: string, excludes: string[]): boolean {
-  if (excludes.length === 0) return false
-  const lower = name.toLowerCase()
-  return excludes.some((pattern) => {
+// Patterns are compiled once per scan (see compileExcludes) rather than per entry,
+// since isExcluded() runs once per filesystem entry visited.
+interface CompiledExcludes {
+  exact: Set<string>
+  regexes: RegExp[]
+}
+
+function compileExcludes(excludes: string[]): CompiledExcludes {
+  const exact = new Set<string>()
+  const regexes: RegExp[] = []
+  for (const pattern of excludes) {
     const p = pattern.trim().toLowerCase()
-    if (!p) return false
-    if (!p.includes('*')) return lower === p
-    const escaped = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
-    return new RegExp(`^${escaped}$`).test(lower)
-  })
+    if (!p) continue
+    if (!p.includes('*')) {
+      exact.add(p)
+    } else {
+      const escaped = p.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*')
+      regexes.push(new RegExp(`^${escaped}$`))
+    }
+  }
+  return { exact, regexes }
+}
+
+function isExcluded(name: string, compiled: CompiledExcludes): boolean {
+  if (compiled.exact.size === 0 && compiled.regexes.length === 0) return false
+  const lower = name.toLowerCase()
+  if (compiled.exact.has(lower)) return true
+  return compiled.regexes.some((re) => re.test(lower))
 }
 
 // ── Active scan tracking (for cancellation) ──────────────────────────────────
@@ -131,7 +149,7 @@ class ScanCancelledError extends Error {
 async function scanDirectory(
   dirPath: string,
   signal: AbortSignal,
-  excludes: string[],
+  excludes: CompiledExcludes,
   onProgress?: (scanned: string) => void
 ): Promise<FolderNode> {
   if (signal.aborted) throw new ScanCancelledError()
@@ -190,7 +208,7 @@ ipcMain.handle(
     }
 
     try {
-      return await scanDirectory(dirPath, controller.signal, excludes, onProgress)
+      return await scanDirectory(dirPath, controller.signal, compileExcludes(excludes), onProgress)
     } finally {
       activeScans.delete(scanId)
     }
@@ -236,7 +254,11 @@ function flattenToCsv(node: FolderNode, rows: string[]): void {
 
 ipcMain.handle(
   'fs:exportReport',
-  async (event, root: FolderNode, format: 'json' | 'csv') => {
+  async (event, root: FolderNode, format: unknown) => {
+    if (format !== 'json' && format !== 'csv') {
+      throw new Error(`Invalid export format: ${String(format)}`)
+    }
+
     const window = BrowserWindow.fromWebContents(event.sender)
     const options: Electron.SaveDialogOptions = {
       title: 'Export Scan Report',

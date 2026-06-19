@@ -61,7 +61,7 @@ const App: React.FC = () => {
   // Cancel any in-flight scan if the component unmounts mid-scan.
   useEffect(() => {
     return () => {
-      if (scanIdRef.current) window.api.cancelScan(scanIdRef.current)
+      if (scanIdRef.current) void window.api.cancelScan(scanIdRef.current).catch(console.error)
     }
   }, [])
 
@@ -85,7 +85,9 @@ const App: React.FC = () => {
         setRootData(result)
         setState('done')
       } catch (err) {
-        setError(String(err))
+        const message = String(err)
+        // A cancelled scan is an expected outcome, not a failure — don't surface an error.
+        if (!message.toLowerCase().includes('cancelled')) setError(message)
         setState('idle')
       } finally {
         unsub()
@@ -96,7 +98,7 @@ const App: React.FC = () => {
   )
 
   const handleCancelScan = useCallback(() => {
-    if (scanIdRef.current) window.api.cancelScan(scanIdRef.current)
+    if (scanIdRef.current) void window.api.cancelScan(scanIdRef.current).catch(console.error)
   }, [])
 
   const handlePickFolder = useCallback(async () => {
@@ -123,7 +125,7 @@ const App: React.FC = () => {
   const closeContextMenu = useCallback(() => setContextMenu(null), [])
 
   const handleReveal = useCallback(() => {
-    if (contextMenu) window.api.revealInFolder(contextMenu.node.path)
+    if (contextMenu) void window.api.revealInFolder(contextMenu.node.path).catch(console.error)
     setContextMenu(null)
   }, [contextMenu])
 
@@ -131,14 +133,22 @@ const App: React.FC = () => {
     if (!contextMenu || !rootData) return
     const { node } = contextMenu
     setContextMenu(null)
-    const result = await window.api.trashItem(node.path, node.name)
-    if (result.deleted) startScan(rootData.path)
+    try {
+      const result = await window.api.trashItem(node.path, node.name)
+      if (result.deleted) startScan(rootData.path)
+    } catch (err) {
+      setError(String(err))
+    }
   }, [contextMenu, rootData, startScan])
 
   const handleExport = useCallback(
     async (format: 'json' | 'csv') => {
       if (!rootData) return
-      await window.api.exportReport(rootData, format)
+      try {
+        await window.api.exportReport(rootData, format)
+      } catch (err) {
+        setError(String(err))
+      }
     },
     [rootData]
   )
