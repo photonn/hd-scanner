@@ -6,11 +6,13 @@ export interface FolderNode {
   path: string
   size: number
   children: FolderNode[]
+  errorCount: number
 }
 
 interface Props {
   root: FolderNode
   onNavigate: (node: FolderNode) => void
+  onContextMenu?: (node: FolderNode, clientX: number, clientY: number) => void
 }
 
 function formatSize(bytes: number): string {
@@ -117,8 +119,9 @@ function buildRects(
   return rects
 }
 
-const TreemapComponent: React.FC<Props> = ({ root, onNavigate }) => {
+const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const wrapperRef = useRef<HTMLDivElement>(null)
   const rectsRef = useRef<RenderNode[]>([])
   const tooltipRef = useRef<HTMLDivElement>(null)
 
@@ -223,16 +226,35 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate }) => {
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       const canvas = canvasRef.current
       const tooltip = tooltipRef.current
-      if (!canvas || !tooltip) return
+      const wrapper = wrapperRef.current
+      if (!canvas || !tooltip || !wrapper) return
       const rect = canvas.getBoundingClientRect()
       const x = e.clientX - rect.left
       const y = e.clientY - rect.top
       const hit = getNodeAt(x, y)
       if (hit) {
         tooltip.style.display = 'block'
-        tooltip.style.left = `${e.clientX + 12}px`
-        tooltip.style.top = `${e.clientY + 12}px`
-        tooltip.innerHTML = `<strong>${hit.node.name}</strong><br/>${formatSize(hit.node.size)}<br/><span class="path">${hit.node.path}</span>`
+        tooltip.replaceChildren()
+
+        const titleEl = document.createElement('strong')
+        titleEl.textContent = hit.node.name
+        const sizeEl = document.createTextNode(formatSize(hit.node.size))
+        const pathEl = document.createElement('span')
+        pathEl.className = 'path'
+        pathEl.textContent = hit.node.path
+
+        tooltip.append(titleEl, document.createElement('br'), sizeEl, document.createElement('br'), pathEl)
+
+        const wrapperRect = wrapper.getBoundingClientRect()
+        const tooltipWidth = tooltip.offsetWidth || 200
+        const tooltipHeight = tooltip.offsetHeight || 60
+        let left = e.clientX + 12
+        let top = e.clientY + 12
+        if (left + tooltipWidth > wrapperRect.right) left = e.clientX - tooltipWidth - 12
+        if (top + tooltipHeight > wrapperRect.bottom) top = e.clientY - tooltipHeight - 12
+        tooltip.style.left = `${Math.max(wrapperRect.left, left)}px`
+        tooltip.style.top = `${Math.max(wrapperRect.top, top)}px`
+
         canvas.style.cursor =
           hit.node !== root && hit.node.children.length > 0 ? 'pointer' : 'default'
       } else {
@@ -248,14 +270,29 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate }) => {
     if (tooltip) tooltip.style.display = 'none'
   }, [])
 
+  const handleContextMenuEvent = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      e.preventDefault()
+      const canvas = canvasRef.current
+      if (!canvas || !onContextMenu) return
+      const rect = canvas.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
+      const hit = getNodeAt(x, y)
+      if (hit) onContextMenu(hit.node, e.clientX, e.clientY)
+    },
+    [getNodeAt, onContextMenu]
+  )
+
   return (
-    <div className="treemap-wrapper">
+    <div className="treemap-wrapper" ref={wrapperRef}>
       <canvas
         ref={canvasRef}
         className="treemap-canvas"
         onClick={handleClick}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
+        onContextMenu={handleContextMenuEvent}
       />
       <div ref={tooltipRef} className="treemap-tooltip" />
     </div>
