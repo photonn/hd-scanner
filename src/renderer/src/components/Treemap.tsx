@@ -311,12 +311,23 @@ const TreemapComponent: React.FC<Props> = ({
 
         const titleEl = document.createElement('strong')
         titleEl.textContent = hit.node.name
+        const typeEl = document.createTextNode(
+          hit.node.children.length > 0 ? 'Folder' : 'File'
+        )
         const sizeEl = document.createTextNode(formatSize(hit.node.size))
         const pathEl = document.createElement('span')
         pathEl.className = 'path'
         pathEl.textContent = hit.node.path
 
-        tooltip.append(titleEl, document.createElement('br'), sizeEl, document.createElement('br'), pathEl)
+        tooltip.append(
+          titleEl,
+          document.createElement('br'),
+          typeEl,
+          document.createTextNode(' · '),
+          sizeEl,
+          document.createElement('br'),
+          pathEl
+        )
 
         const wrapperRect = wrapper.getBoundingClientRect()
         const tooltipWidth = tooltip.offsetWidth || 200
