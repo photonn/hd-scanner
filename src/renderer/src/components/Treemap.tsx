@@ -181,12 +181,16 @@ const TreemapComponent: React.FC<Props> = ({
         const label = r.node.name
         const sizeLabel = formatSize(r.node.size)
         const fontSize = Math.min(13, Math.max(9, r.height / 5))
-        ctx.fillStyle = 'rgba(255,255,255,0.92)'
+        const icon = r.node.children.length > 0 ? '📁' : '📄'
         ctx.font = `bold ${fontSize}px system-ui, sans-serif`
+        const iconWidth = ctx.measureText(icon).width + 4
 
-        const maxWidth = r.width - 8
+        ctx.fillStyle = 'rgba(255,255,255,0.92)'
+        ctx.fillText(icon, r.x + 4, r.y + fontSize + 2)
+
+        const maxWidth = r.width - 8 - iconWidth
         const truncated = truncateText(ctx, label, maxWidth)
-        ctx.fillText(truncated, r.x + 4, r.y + fontSize + 2)
+        ctx.fillText(truncated, r.x + 4 + iconWidth, r.y + fontSize + 2)
 
         if (r.height > 30 && fontSize > 9) {
           ctx.font = `${Math.max(8, fontSize - 2)}px system-ui, sans-serif`
@@ -307,12 +311,23 @@ const TreemapComponent: React.FC<Props> = ({
 
         const titleEl = document.createElement('strong')
         titleEl.textContent = hit.node.name
+        const typeEl = document.createTextNode(
+          hit.node.children.length > 0 ? 'Folder' : 'File'
+        )
         const sizeEl = document.createTextNode(formatSize(hit.node.size))
         const pathEl = document.createElement('span')
         pathEl.className = 'path'
         pathEl.textContent = hit.node.path
 
-        tooltip.append(titleEl, document.createElement('br'), sizeEl, document.createElement('br'), pathEl)
+        tooltip.append(
+          titleEl,
+          document.createElement('br'),
+          typeEl,
+          document.createTextNode(' · '),
+          sizeEl,
+          document.createElement('br'),
+          pathEl
+        )
 
         const wrapperRect = wrapper.getBoundingClientRect()
         const tooltipWidth = tooltip.offsetWidth || 200

@@ -136,21 +136,6 @@ const App: React.FC = () => {
     }
   }, [])
 
-  // "Go in one level": drills into the deepest single-clicked (expanded)
-  // folder, or — if none is expanded — into the current root's largest child.
-  const handleLevelIn = useCallback(() => {
-    const target = expandedPath[expandedPath.length - 1] ?? currentNode?.children[0] ?? null
-    if (target && target.children.length > 0) {
-      setNavStack((prev) => [...prev, target])
-    }
-  }, [expandedPath, currentNode])
-
-  // "Go back one level": same as jumping to the previous breadcrumb; a no-op
-  // if we're already at the scan's root.
-  const handleLevelOut = useCallback(() => {
-    setNavStack((prev) => (prev.length === 0 ? prev : prev.slice(0, -1)))
-  }, [])
-
   const handleContextMenu = useCallback((node: FolderNode, x: number, y: number) => {
     setContextMenu({ node, x, y })
   }, [])
@@ -289,22 +274,6 @@ const App: React.FC = () => {
                   ⚠️ {rootData.errorCount} skipped
                 </span>
               )}
-              <button
-                className="btn btn-secondary"
-                onClick={handleLevelOut}
-                disabled={state !== 'done' || navStack.length === 0}
-                title="Go back one level"
-              >
-                ⬆️ Level out
-              </button>
-              <button
-                className="btn btn-secondary"
-                onClick={handleLevelIn}
-                disabled={state !== 'done' || !currentNode || currentNode.children.length === 0}
-                title="Go in one level"
-              >
-                ⬇️ Level in
-              </button>
               {state === 'done' && (
                 <>
                   <button className="btn btn-secondary" onClick={() => handleExport('json')}>
