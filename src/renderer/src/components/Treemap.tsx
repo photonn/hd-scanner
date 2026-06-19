@@ -140,6 +140,13 @@ const TreemapComponent: React.FC<Props> = ({
   const wrapperRef = useRef<HTMLDivElement>(null)
   const rectsRef = useRef<RenderNode[]>([])
   const tooltipRef = useRef<HTMLDivElement>(null)
+  const clickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+
+  useEffect(() => {
+    return () => {
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current)
+    }
+  }, [])
 
   const draw = useCallback(() => {
     const canvas = canvasRef.current
@@ -223,6 +230,24 @@ const TreemapComponent: React.FC<Props> = ({
     return null
   }, [])
 
+  const expandedPathRef = useRef(expandedPath)
+  expandedPathRef.current = expandedPath
+
+  const expandOrCollapse = useCallback(
+    (hit: RenderNode) => {
+      const path = expandedPathRef.current
+      // Clicking the tile already expanded at this depth collapses it (and
+      // anything nested deeper); clicking any other tile expands it one
+      // level further, discarding whatever was expanded below the old path.
+      if (path[hit.depth] === hit.node) {
+        onExpandPath(path.slice(0, hit.depth))
+      } else {
+        onExpandPath([...path.slice(0, hit.depth), hit.node])
+      }
+    },
+    [onExpandPath]
+  )
+
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (!interactive) return
@@ -233,21 +258,26 @@ const TreemapComponent: React.FC<Props> = ({
       const y = e.clientY - rect.top
       const hit = getNodeAt(x, y)
       if (!hit || hit.node.children.length === 0) return
-      // Clicking the tile already expanded at this depth collapses it (and
-      // anything nested deeper); clicking any other tile expands it one
-      // level further, discarding whatever was expanded below the old path.
-      if (expandedPath[hit.depth] === hit.node) {
-        onExpandPath(expandedPath.slice(0, hit.depth))
-      } else {
-        onExpandPath([...expandedPath.slice(0, hit.depth), hit.node])
-      }
+      // Defer the expand toggle briefly so a follow-up second click (which
+      // fires its own onClick before onDoubleClick) can be caught by
+      // handleDoubleClick and cancel this, instead of expanding/collapsing
+      // right before navigating away.
+      if (clickTimerRef.current) clearTimeout(clickTimerRef.current)
+      clickTimerRef.current = setTimeout(() => {
+        clickTimerRef.current = null
+        expandOrCollapse(hit)
+      }, 250)
     },
-    [getNodeAt, onExpandPath, expandedPath, interactive]
+    [getNodeAt, expandOrCollapse, interactive]
   )
 
   const handleDoubleClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       if (!interactive) return
+      if (clickTimerRef.current) {
+        clearTimeout(clickTimerRef.current)
+        clickTimerRef.current = null
+      }
       const canvas = canvasRef.current
       if (!canvas) return
       const rect = canvas.getBoundingClientRect()

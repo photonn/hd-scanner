@@ -16,8 +16,8 @@ declare global {
         root: FolderNode,
         format: 'json' | 'csv'
       ) => Promise<{ saved: boolean; filePath?: string }>
-      onScanProgress: (cb: (path: string) => void) => () => void
-      onScanSnapshot: (cb: (node: FolderNode) => void) => () => void
+      onScanProgress: (cb: (scanId: string, path: string) => void) => () => void
+      onScanSnapshot: (cb: (scanId: string, node: FolderNode) => void) => () => void
     }
   }
 }
@@ -89,8 +89,14 @@ const App: React.FC = () => {
       const scanId = crypto.randomUUID()
       scanIdRef.current = scanId
 
-      const unsubProgress = window.api.onScanProgress((p) => setScanningPath(p))
-      const unsubSnapshot = window.api.onScanSnapshot((node) => setRootData(node))
+      // Stale events from a superseded/cancelled scan must not clobber the
+      // current scan's state, so ignore anything not tagged with this scanId.
+      const unsubProgress = window.api.onScanProgress((id, p) => {
+        if (id === scanId) setScanningPath(p)
+      })
+      const unsubSnapshot = window.api.onScanSnapshot((id, node) => {
+        if (id === scanId) setRootData(node)
+      })
       try {
         const result = await window.api.scanDirectory(dirPath, scanId, parseExcludes(excludeInput))
         setRootData(result)

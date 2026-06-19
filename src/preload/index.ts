@@ -30,14 +30,16 @@ const api = {
   ): Promise<{ saved: boolean; filePath?: string }> =>
     ipcRenderer.invoke('fs:exportReport', root, format),
 
-  onScanProgress: (callback: (path: string) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, path: string): void => callback(path)
+  onScanProgress: (callback: (scanId: string, path: string) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, scanId: string, path: string): void =>
+      callback(scanId, path)
     ipcRenderer.on('fs:scanProgress', handler)
     return () => ipcRenderer.removeListener('fs:scanProgress', handler)
   },
 
-  onScanSnapshot: (callback: (node: FolderNode) => void): (() => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, node: FolderNode): void => callback(node)
+  onScanSnapshot: (callback: (scanId: string, node: FolderNode) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, scanId: string, node: FolderNode): void =>
+      callback(scanId, node)
     ipcRenderer.on('fs:scanSnapshot', handler)
     return () => ipcRenderer.removeListener('fs:scanSnapshot', handler)
   }

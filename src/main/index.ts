@@ -216,13 +216,23 @@ ipcMain.handle(
     const controller = new AbortController()
     activeScans.set(scanId, controller)
 
+    const safeSend = (channel: string, ...args: unknown[]): void => {
+      if (!event.sender.isDestroyed()) event.sender.send(channel, ...args)
+    }
+
     const onProgress = (scanned: string): void => {
-      event.sender.send('fs:scanProgress', scanned)
+      safeSend('fs:scanProgress', scanId, scanned)
     }
 
     let rootNode: FolderNode | null = null
+    // Skip the (relatively expensive) deep clone + send when the tree hasn't
+    // grown since the last tick — common for small/fast-finishing scans.
+    let lastSnapshotSize = -1
     const snapshotTimer = setInterval(() => {
-      if (rootNode) event.sender.send('fs:scanSnapshot', structuredClone(rootNode))
+      if (rootNode && rootNode.size !== lastSnapshotSize) {
+        lastSnapshotSize = rootNode.size
+        safeSend('fs:scanSnapshot', scanId, structuredClone(rootNode))
+      }
     }, SNAPSHOT_INTERVAL_MS)
 
     try {
