@@ -8,6 +8,15 @@ export type FolderNode = {
   errorCount: number
 }
 
+export type ScanHeartbeat = {
+  elapsedMs: number
+  idleMs: number
+  dirsEntered: number
+  filesStated: number
+  activeOps: number
+  lastPath: string
+}
+
 const api = {
   openFolder: (): Promise<string | null> => ipcRenderer.invoke('dialog:openFolder'),
 
@@ -17,6 +26,9 @@ const api = {
     ipcRenderer.invoke('fs:scanDirectory', dirPath, scanId, excludes),
 
   cancelScan: (scanId: string): Promise<void> => ipcRenderer.invoke('fs:cancelScan', scanId),
+
+  setDebugMode: (enabled: boolean): Promise<void> =>
+    ipcRenderer.invoke('fs:setDebugMode', enabled),
 
   revealInFolder: (itemPath: string): Promise<void> =>
     ipcRenderer.invoke('fs:revealInFolder', itemPath),
@@ -42,6 +54,16 @@ const api = {
       callback(scanId, node)
     ipcRenderer.on('fs:scanSnapshot', handler)
     return () => ipcRenderer.removeListener('fs:scanSnapshot', handler)
+  },
+
+  onScanHeartbeat: (callback: (scanId: string, heartbeat: ScanHeartbeat) => void): (() => void) => {
+    const handler = (
+      _event: Electron.IpcRendererEvent,
+      scanId: string,
+      heartbeat: ScanHeartbeat
+    ): void => callback(scanId, heartbeat)
+    ipcRenderer.on('fs:scanHeartbeat', handler)
+    return () => ipcRenderer.removeListener('fs:scanHeartbeat', handler)
   }
 }
 

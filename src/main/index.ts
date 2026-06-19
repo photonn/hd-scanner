@@ -145,11 +145,52 @@ function isExcluded(name: string, compiled: CompiledExcludes): boolean {
 // ── Active scan tracking (for cancellation) ──────────────────────────────────
 const activeScans = new Map<string, AbortController>()
 
+// ── Debug mode ────────────────────────────────────────────────────────────────
+// Toggled from the renderer so the user can watch what a scan is doing in the
+// terminal/devtools console in real time — useful for telling apart "still
+// scanning something big" from "actually frozen".
+let debugEnabled = false
+
+interface ScanStats {
+  dirsEntered: number
+  filesStated: number
+  activeOps: number
+  lastPath: string
+  lastActivityAt: number
+}
+
+function debugLog(scanId: string, ...args: unknown[]): void {
+  if (debugEnabled) console.log(`[scan:${scanId.slice(0, 8)}]`, ...args)
+}
+
 class ScanCancelledError extends Error {
   constructor() {
     super('Scan cancelled')
     this.name = 'ScanCancelledError'
   }
+}
+
+// fs.promises readdir/stat don't support an AbortSignal option, so a hung
+// syscall (e.g. an unresponsive network mount) would otherwise keep the scan
+// "stuck" forever even after the user cancels. Racing every fs call against
+// the signal lets cancellation unblock the promise chain immediately — the
+// underlying I/O may keep running in the background, but we stop waiting on it.
+function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(new ScanCancelledError())
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(new ScanCancelledError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (err) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(err)
+      }
+    )
+  })
 }
 
 // ── Recursive folder scanner ─────────────────────────────────────────────────
@@ -161,6 +202,7 @@ async function scanDirectory(
   dirPath: string,
   signal: AbortSignal,
   excludes: CompiledExcludes,
+  stats: ScanStats,
   onProgress?: (scanned: string) => void,
   onRootCreated?: (node: FolderNode) => void
 ): Promise<FolderNode> {
@@ -170,32 +212,50 @@ async function scanDirectory(
   const node: FolderNode = { name, path: dirPath, size: 0, children: [], errorCount: 0 }
   if (onRootCreated) onRootCreated(node)
 
+  stats.dirsEntered += 1
+  stats.activeOps += 1
+  stats.lastPath = dirPath
+  stats.lastActivityAt = Date.now()
+
   let entries: Dirent<string>[]
   try {
-    entries = await fs.readdir(dirPath, { withFileTypes: true, encoding: 'utf8' })
+    entries = await abortable(
+      fs.readdir(dirPath, { withFileTypes: true, encoding: 'utf8' }),
+      signal
+    )
   } catch {
+    stats.activeOps -= 1
+    if (signal.aborted) throw new ScanCancelledError()
     node.errorCount = 1
     return node
   }
+  stats.activeOps -= 1
+  stats.lastActivityAt = Date.now()
 
   const tasks = entries.map(async (entry) => {
     if (signal.aborted) return
     if (isExcluded(entry.name, excludes)) return
     const fullPath = join(dirPath, entry.name)
+    stats.activeOps += 1
     try {
       if (entry.isSymbolicLink()) return
       if (entry.isDirectory()) {
         if (onProgress) onProgress(fullPath)
-        const child = await scanDirectory(fullPath, signal, excludes, onProgress)
+        const child = await scanDirectory(fullPath, signal, excludes, stats, onProgress)
         node.children.push(child)
         node.size += child.size
         node.errorCount += child.errorCount
       } else if (entry.isFile()) {
-        const stat = await fs.stat(fullPath)
+        const stat = await abortable(fs.stat(fullPath), signal)
         node.size += stat.size
+        stats.filesStated += 1
       }
     } catch {
-      node.errorCount += 1
+      if (!signal.aborted) node.errorCount += 1
+    } finally {
+      stats.activeOps -= 1
+      stats.lastPath = fullPath
+      stats.lastActivityAt = Date.now()
     }
   })
 
@@ -209,6 +269,7 @@ async function scanDirectory(
 
 // ── IPC: scan a directory, streaming progress + live snapshots ──────────────
 const SNAPSHOT_INTERVAL_MS = 400
+const HEARTBEAT_INTERVAL_MS = 1000
 
 ipcMain.handle(
   'fs:scanDirectory',
@@ -224,6 +285,16 @@ ipcMain.handle(
       safeSend('fs:scanProgress', scanId, scanned)
     }
 
+    const stats: ScanStats = {
+      dirsEntered: 0,
+      filesStated: 0,
+      activeOps: 0,
+      lastPath: dirPath,
+      lastActivityAt: Date.now()
+    }
+    const startedAt = Date.now()
+    debugLog(scanId, 'scan started', dirPath, 'excludes:', excludes)
+
     let rootNode: FolderNode | null = null
     // Skip the (relatively expensive) deep clone + send when the tree hasn't
     // grown since the last tick — common for small/fast-finishing scans.
@@ -235,26 +306,60 @@ ipcMain.handle(
       }
     }, SNAPSHOT_INTERVAL_MS)
 
+    const heartbeatTimer = setInterval(() => {
+      const elapsedMs = Date.now() - startedAt
+      const idleMs = Date.now() - stats.lastActivityAt
+      const heartbeat = {
+        elapsedMs,
+        idleMs,
+        dirsEntered: stats.dirsEntered,
+        filesStated: stats.filesStated,
+        activeOps: stats.activeOps,
+        lastPath: stats.lastPath
+      }
+      safeSend('fs:scanHeartbeat', scanId, heartbeat)
+      debugLog(
+        scanId,
+        `heartbeat: dirs=${stats.dirsEntered} files=${stats.filesStated} activeOps=${stats.activeOps} idleMs=${idleMs} lastPath=${stats.lastPath}`
+      )
+    }, HEARTBEAT_INTERVAL_MS)
+
     try {
-      return await scanDirectory(
+      const result = await scanDirectory(
         dirPath,
         controller.signal,
         compileExcludes(excludes),
+        stats,
         onProgress,
         (node) => {
           rootNode = node
         }
       )
+      debugLog(
+        scanId,
+        `scan finished in ${Date.now() - startedAt}ms — dirs=${stats.dirsEntered} files=${stats.filesStated}`
+      )
+      return result
+    } catch (err) {
+      debugLog(scanId, 'scan ended:', err instanceof Error ? err.message : err)
+      throw err
     } finally {
       clearInterval(snapshotTimer)
+      clearInterval(heartbeatTimer)
       activeScans.delete(scanId)
     }
   }
 )
 
 ipcMain.handle('fs:cancelScan', (_event, scanId: string) => {
+  debugLog(scanId, 'cancel requested')
   const controller = activeScans.get(scanId)
   if (controller) controller.abort()
+})
+
+ipcMain.handle('fs:setDebugMode', (_event, enabled: boolean) => {
+  debugEnabled = enabled
+  console.log(`[scan] debug mode ${enabled ? 'enabled' : 'disabled'}`)
 })
 
 // ── IPC: reveal a file/folder in the OS file manager ─────────────────────────

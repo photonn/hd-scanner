@@ -3,6 +3,15 @@ import TreemapComponent, { FolderNode } from './components/Treemap'
 
 type AppState = 'idle' | 'scanning' | 'done'
 
+type ScanHeartbeat = {
+  elapsedMs: number
+  idleMs: number
+  dirsEntered: number
+  filesStated: number
+  activeOps: number
+  lastPath: string
+}
+
 declare global {
   interface Window {
     api: {
@@ -10,6 +19,7 @@ declare global {
       listDrives: () => Promise<string[]>
       scanDirectory: (path: string, scanId: string, excludes: string[]) => Promise<FolderNode>
       cancelScan: (scanId: string) => Promise<void>
+      setDebugMode: (enabled: boolean) => Promise<void>
       revealInFolder: (itemPath: string) => Promise<void>
       trashItem: (itemPath: string, itemName: string) => Promise<{ deleted: boolean }>
       exportReport: (
@@ -18,6 +28,7 @@ declare global {
       ) => Promise<{ saved: boolean; filePath?: string }>
       onScanProgress: (cb: (scanId: string, path: string) => void) => () => void
       onScanSnapshot: (cb: (scanId: string, node: FolderNode) => void) => () => void
+      onScanHeartbeat: (cb: (scanId: string, heartbeat: ScanHeartbeat) => void) => () => void
     }
   }
 }
@@ -53,11 +64,26 @@ const App: React.FC = () => {
   const [excludeInput, setExcludeInput] = useState<string>('node_modules, .git')
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
   const [expandedPath, setExpandedPath] = useState<FolderNode[]>([])
+  const [debugMode, setDebugMode] = useState<boolean>(
+    () => localStorage.getItem('hd-scanner:debug') === '1'
+  )
+  const [heartbeat, setHeartbeat] = useState<ScanHeartbeat | null>(null)
 
   const scanIdRef = useRef<string | null>(null)
 
   useEffect(() => {
     window.api.listDrives().then(setDrives).catch(console.error)
+  }, [])
+
+  // Keep main-process logging in sync with the toggle, and persist it across
+  // restarts so a debug session survives an app reload.
+  useEffect(() => {
+    localStorage.setItem('hd-scanner:debug', debugMode ? '1' : '0')
+    void window.api.setDebugMode(debugMode).catch(console.error)
+  }, [debugMode])
+
+  const handleToggleDebug = useCallback(() => {
+    setDebugMode((prev) => !prev)
   }, [])
 
   // Cancel any in-flight scan if the component unmounts mid-scan.
@@ -85,34 +111,54 @@ const App: React.FC = () => {
       setRootData(null)
       setContextMenu(null)
       setExpandedPath([])
+      setHeartbeat(null)
 
       const scanId = crypto.randomUUID()
       scanIdRef.current = scanId
+      if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] starting`, dirPath)
 
       // Stale events from a superseded/cancelled scan must not clobber the
       // current scan's state, so ignore anything not tagged with this scanId.
       const unsubProgress = window.api.onScanProgress((id, p) => {
-        if (id === scanId) setScanningPath(p)
+        if (id !== scanId) return
+        setScanningPath(p)
+        if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] progress`, p)
       })
       const unsubSnapshot = window.api.onScanSnapshot((id, node) => {
-        if (id === scanId) setRootData(node)
+        if (id !== scanId) return
+        setRootData(node)
+        if (debugMode)
+          console.log(
+            `[scan:${scanId.slice(0, 8)}] snapshot`,
+            `size=${node.size}`,
+            `children=${node.children.length}`
+          )
+      })
+      const unsubHeartbeat = window.api.onScanHeartbeat((id, hb) => {
+        if (id !== scanId) return
+        setHeartbeat(hb)
+        if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] heartbeat`, hb)
       })
       try {
         const result = await window.api.scanDirectory(dirPath, scanId, parseExcludes(excludeInput))
         setRootData(result)
         setState('done')
+        if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] done`)
       } catch (err) {
         const message = String(err)
+        if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] ended:`, message)
         // A cancelled scan is an expected outcome, not a failure — don't surface an error.
         if (!message.toLowerCase().includes('cancelled')) setError(message)
         setState('idle')
       } finally {
         unsubProgress()
         unsubSnapshot()
+        unsubHeartbeat()
         scanIdRef.current = null
+        setHeartbeat(null)
       }
     },
-    [excludeInput]
+    [excludeInput, debugMode]
   )
 
   const handleCancelScan = useCallback(() => {
@@ -186,6 +232,13 @@ const App: React.FC = () => {
           <h1 className="app-title">HD Scanner</h1>
         </div>
         <div className="header-actions">
+          <button
+            className={`btn btn-secondary${debugMode ? ' btn-debug-active' : ''}`}
+            onClick={handleToggleDebug}
+            title="Log scan progress and per-second stats to the console, and show a live stats panel"
+          >
+            🐛 Debug {debugMode ? 'on' : 'off'}
+          </button>
           <button className="btn btn-primary" onClick={handlePickFolder}>
             📂 Choose Folder…
           </button>
@@ -320,6 +373,44 @@ const App: React.FC = () => {
               ? 'Live preview — finishing the scan…'
               : 'Click a folder to preview its contents inline. Double-click to drill in. Right-click for more actions.'}
           </div>
+        </div>
+      )}
+
+      {debugMode && heartbeat && state === 'scanning' && (
+        <div className="debug-panel">
+          <div className="debug-panel-title">🐛 Scan debug</div>
+          <div className="debug-panel-row">
+            <span>Elapsed</span>
+            <span>{(heartbeat.elapsedMs / 1000).toFixed(1)}s</span>
+          </div>
+          <div className="debug-panel-row">
+            <span>Idle since last activity</span>
+            <span className={heartbeat.idleMs > 5000 ? 'debug-warn' : undefined}>
+              {(heartbeat.idleMs / 1000).toFixed(1)}s
+            </span>
+          </div>
+          <div className="debug-panel-row">
+            <span>Dirs entered</span>
+            <span>{heartbeat.dirsEntered}</span>
+          </div>
+          <div className="debug-panel-row">
+            <span>Files stat&apos;d</span>
+            <span>{heartbeat.filesStated}</span>
+          </div>
+          <div className="debug-panel-row">
+            <span>Active ops</span>
+            <span>{heartbeat.activeOps}</span>
+          </div>
+          <div className="debug-panel-row debug-panel-path" title={heartbeat.lastPath}>
+            <span>Last path</span>
+            <span>{heartbeat.lastPath}</span>
+          </div>
+          {heartbeat.idleMs > 5000 && heartbeat.activeOps > 0 && (
+            <div className="debug-panel-hint">
+              No activity for {(heartbeat.idleMs / 1000).toFixed(0)}s with {heartbeat.activeOps}{' '}
+              op(s) outstanding — likely stuck on a slow/unresponsive path.
+            </div>
+          )}
         </div>
       )}
 
