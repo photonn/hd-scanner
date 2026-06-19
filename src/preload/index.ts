@@ -5,6 +5,7 @@ export type FolderNode = {
   path: string
   size: number
   children: FolderNode[]
+  errorCount: number
 }
 
 const api = {
@@ -12,8 +13,22 @@ const api = {
 
   listDrives: (): Promise<string[]> => ipcRenderer.invoke('fs:listDrives'),
 
-  scanDirectory: (dirPath: string): Promise<FolderNode> =>
-    ipcRenderer.invoke('fs:scanDirectory', dirPath),
+  scanDirectory: (dirPath: string, scanId: string, excludes: string[]): Promise<FolderNode> =>
+    ipcRenderer.invoke('fs:scanDirectory', dirPath, scanId, excludes),
+
+  cancelScan: (scanId: string): Promise<void> => ipcRenderer.invoke('fs:cancelScan', scanId),
+
+  revealInFolder: (itemPath: string): Promise<void> =>
+    ipcRenderer.invoke('fs:revealInFolder', itemPath),
+
+  trashItem: (itemPath: string, itemName: string): Promise<{ deleted: boolean }> =>
+    ipcRenderer.invoke('fs:trashItem', itemPath, itemName),
+
+  exportReport: (
+    root: FolderNode,
+    format: 'json' | 'csv'
+  ): Promise<{ saved: boolean; filePath?: string }> =>
+    ipcRenderer.invoke('fs:exportReport', root, format),
 
   onScanProgress: (callback: (path: string) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, path: string): void => callback(path)

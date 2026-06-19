@@ -191,6 +191,36 @@ body,
   font-size: 13px;
 }
 
+/* ── Exclude patterns ─────────────────────────────────────────────────────── */
+.exclude-section {
+  margin-bottom: 24px;
+  text-align: left;
+}
+
+.exclude-label {
+  display: block;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+
+.exclude-input {
+  width: 100%;
+  padding: 8px 12px;
+  border-radius: var(--radius);
+  border: 1px solid var(--border);
+  background: var(--surface2);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+.exclude-input:focus {
+  border-color: var(--accent2);
+}
+
 /* ── Scanning overlay ─────────────────────────────────────────────────────── */
 .scanning-overlay {
   flex: 1;
@@ -313,6 +343,50 @@ body,
   font-weight: 700;
   color: var(--text);
   border: 1px solid var(--border);
+}
+
+.error-badge {
+  background: rgba(233, 69, 96, 0.15);
+  color: var(--accent);
+  padding: 4px 10px;
+  border-radius: 20px;
+  font-size: 12px;
+  font-weight: 600;
+  border: 1px solid rgba(233, 69, 96, 0.3);
+  cursor: help;
+}
+
+/* ── Context menu ─────────────────────────────────────────────────────────── */
+.context-menu {
+  position: fixed;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 4px;
+  z-index: 10000;
+  min-width: 200px;
+}
+
+.context-menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--text);
+  padding: 8px 12px;
+  font-size: 13px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.context-menu-item:hover {
+  background: var(--surface2);
+}
+
+.context-menu-danger {
+  color: var(--accent);
 }
 
 /* ── Canvas treemap ───────────────────────────────────────────────────────── */
