@@ -16,7 +16,8 @@ declare global {
         root: FolderNode,
         format: 'json' | 'csv'
       ) => Promise<{ saved: boolean; filePath?: string }>
-      onScanProgress: (cb: (path: string) => void) => () => void
+      onScanProgress: (cb: (scanId: string, path: string) => void) => () => void
+      onScanSnapshot: (cb: (scanId: string, node: FolderNode) => void) => () => void
     }
   }
 }
@@ -51,6 +52,7 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null)
   const [excludeInput, setExcludeInput] = useState<string>('node_modules, .git')
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null)
+  const [expandedPath, setExpandedPath] = useState<FolderNode[]>([])
 
   const scanIdRef = useRef<string | null>(null)
 
@@ -67,6 +69,13 @@ const App: React.FC = () => {
 
   const currentNode = navStack.length > 0 ? navStack[navStack.length - 1] : rootData
 
+  // Collapse any in-place expansion whenever the viewed root changes (drill
+  // in/out, breadcrumb jump, new scan) since the expanded path belongs to
+  // the previous root's children.
+  useEffect(() => {
+    setExpandedPath([])
+  }, [currentNode?.path])
+
   const startScan = useCallback(
     async (dirPath: string) => {
       setState('scanning')
@@ -75,11 +84,19 @@ const App: React.FC = () => {
       setNavStack([])
       setRootData(null)
       setContextMenu(null)
+      setExpandedPath([])
 
       const scanId = crypto.randomUUID()
       scanIdRef.current = scanId
 
-      const unsub = window.api.onScanProgress((p) => setScanningPath(p))
+      // Stale events from a superseded/cancelled scan must not clobber the
+      // current scan's state, so ignore anything not tagged with this scanId.
+      const unsubProgress = window.api.onScanProgress((id, p) => {
+        if (id === scanId) setScanningPath(p)
+      })
+      const unsubSnapshot = window.api.onScanSnapshot((id, node) => {
+        if (id === scanId) setRootData(node)
+      })
       try {
         const result = await window.api.scanDirectory(dirPath, scanId, parseExcludes(excludeInput))
         setRootData(result)
@@ -90,7 +107,8 @@ const App: React.FC = () => {
         if (!message.toLowerCase().includes('cancelled')) setError(message)
         setState('idle')
       } finally {
-        unsub()
+        unsubProgress()
+        unsubSnapshot()
         scanIdRef.current = null
       }
     },
@@ -116,6 +134,21 @@ const App: React.FC = () => {
     } else {
       setNavStack((prev) => prev.slice(0, index + 1))
     }
+  }, [])
+
+  // "Go in one level": drills into the deepest single-clicked (expanded)
+  // folder, or — if none is expanded — into the current root's largest child.
+  const handleLevelIn = useCallback(() => {
+    const target = expandedPath[expandedPath.length - 1] ?? currentNode?.children[0] ?? null
+    if (target && target.children.length > 0) {
+      setNavStack((prev) => [...prev, target])
+    }
+  }, [expandedPath, currentNode])
+
+  // "Go back one level": same as jumping to the previous breadcrumb; a no-op
+  // if we're already at the scan's root.
+  const handleLevelOut = useCallback(() => {
+    setNavStack((prev) => (prev.length === 0 ? prev : prev.slice(0, -1)))
   }, [])
 
   const handleContextMenu = useCallback((node: FolderNode, x: number, y: number) => {
@@ -216,7 +249,7 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {state === 'scanning' && (
+      {state === 'scanning' && !rootData && (
         <div className="scanning-overlay">
           <div className="scanning-card">
             <div className="spinner" />
@@ -229,7 +262,7 @@ const App: React.FC = () => {
         </div>
       )}
 
-      {state === 'done' && currentNode && (
+      {(state === 'scanning' || state === 'done') && currentNode && (
         <div className="treemap-view">
           <div className="treemap-toolbar">
             <nav className="breadcrumb" aria-label="Navigation">
@@ -256,29 +289,67 @@ const App: React.FC = () => {
                   ⚠️ {rootData.errorCount} skipped
                 </span>
               )}
-              <button className="btn btn-secondary" onClick={() => handleExport('json')}>
-                ⬇️ Export JSON
+              <button
+                className="btn btn-secondary"
+                onClick={handleLevelOut}
+                disabled={state !== 'done' || navStack.length === 0}
+                title="Go back one level"
+              >
+                ⬆️ Level out
               </button>
-              <button className="btn btn-secondary" onClick={() => handleExport('csv')}>
-                ⬇️ Export CSV
+              <button
+                className="btn btn-secondary"
+                onClick={handleLevelIn}
+                disabled={state !== 'done' || !currentNode || currentNode.children.length === 0}
+                title="Go in one level"
+              >
+                ⬇️ Level in
               </button>
-              <button className="btn btn-secondary" onClick={handlePickFolder}>
-                🔄 New scan
-              </button>
+              {state === 'done' && (
+                <>
+                  <button className="btn btn-secondary" onClick={() => handleExport('json')}>
+                    ⬇️ Export JSON
+                  </button>
+                  <button className="btn btn-secondary" onClick={() => handleExport('csv')}>
+                    ⬇️ Export CSV
+                  </button>
+                </>
+              )}
+              {state === 'scanning' ? (
+                <button className="btn btn-secondary" onClick={handleCancelScan}>
+                  ✋ Cancel scan
+                </button>
+              ) : (
+                <button className="btn btn-secondary" onClick={handlePickFolder}>
+                  🔄 New scan
+                </button>
+              )}
             </div>
           </div>
 
+          {state === 'scanning' && (
+            <div className="scanning-indicator">
+              <div className="spinner spinner-small" />
+              <span className="scanning-path">{scanningPath}</span>
+            </div>
+          )}
+
           <div className="treemap-container">
             <TreemapComponent
-              key={currentNode.path}
+              key={rootData?.path}
               root={currentNode}
               onNavigate={handleNavigate}
               onContextMenu={handleContextMenu}
+              expandedPath={expandedPath}
+              onExpandPath={setExpandedPath}
+              interactive={state === 'done'}
             />
           </div>
 
           <div className="treemap-hint">
-            Click a folder rectangle to drill down. Right-click for more actions.
+            {state === 'scanning'
+              ? 'Live preview — finishing the scan…'
+              : 'Click a folder to preview its contents inline. Double-click to drill in. Right-click for more actions.'}
           </div>
         </div>
       )}
