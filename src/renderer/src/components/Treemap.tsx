@@ -23,7 +23,7 @@ function formatSize(bytes: number): string {
   return bytes + ' B'
 }
 
-// A pleasing palette for folder tiles
+// A pleasing palette of solid, distinct colors for folder tiles
 const PALETTE = [
   '#4e79a7',
   '#f28e2b',
@@ -37,21 +37,8 @@ const PALETTE = [
   '#bab0ac'
 ]
 
-function colorFor(index: number, depth: number): string {
-  const base = PALETTE[index % PALETTE.length]
-  // Darken slightly for deeper levels
-  const factor = Math.max(0.6, 1 - depth * 0.08)
-  return lighten(base, factor)
-}
-
-function lighten(hex: string, factor: number): string {
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b = parseInt(hex.slice(5, 7), 16)
-  const nr = Math.round(r * factor)
-  const ng = Math.round(g * factor)
-  const nb = Math.round(b * factor)
-  return `rgb(${nr},${ng},${nb})`
+function colorFor(index: number): string {
+  return PALETTE[index % PALETTE.length]
 }
 
 interface RenderNode {
@@ -138,14 +125,14 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) 
     const allRects = buildRects(root, 0, 0, width, height, 0, 0)
     rectsRef.current = allRects
 
-    // Draw from deepest to shallowest (painters algorithm)
-    const sorted = [...allRects].sort((a, b) => b.depth - a.depth)
+    // Draw from shallowest to deepest so child tiles paint over their parent (painter's algorithm)
+    const sorted = [...allRects].sort((a, b) => a.depth - b.depth)
 
     for (const r of sorted) {
       if (r.width < 1 || r.height < 1) continue
 
       // Fill
-      ctx.fillStyle = colorFor(r.colorIdx, r.depth)
+      ctx.fillStyle = colorFor(r.colorIdx)
       ctx.fillRect(r.x, r.y, r.width, r.height)
 
       // Border
