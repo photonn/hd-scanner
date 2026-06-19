@@ -32,7 +32,7 @@ cd hd-scanner
 
 # NOTE: electron-vite@5 and vite@8 currently have a peer-dependency conflict.
 # Until that's resolved upstream, install with:
-npm install --legacy-peer-deps
+npm ci --legacy-peer-deps
 
 npm run dev      # start in development mode (hot-reload)
 ```

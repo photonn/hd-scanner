@@ -7,7 +7,7 @@ Thanks for your interest in contributing! This document covers how to get set up
 ```bash
 git clone https://github.com/photonn/hd-scanner.git
 cd hd-scanner
-npm install --legacy-peer-deps   # see note in README about electron-vite/vite peer conflict
+npm ci --legacy-peer-deps   # see note in README about electron-vite/vite peer conflict
 npm run dev
 ```
 
