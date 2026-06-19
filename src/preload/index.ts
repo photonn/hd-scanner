@@ -34,6 +34,12 @@ const api = {
     const handler = (_event: Electron.IpcRendererEvent, path: string): void => callback(path)
     ipcRenderer.on('fs:scanProgress', handler)
     return () => ipcRenderer.removeListener('fs:scanProgress', handler)
+  },
+
+  onScanSnapshot: (callback: (node: FolderNode) => void): (() => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, node: FolderNode): void => callback(node)
+    ipcRenderer.on('fs:scanSnapshot', handler)
+    return () => ipcRenderer.removeListener('fs:scanSnapshot', handler)
   }
 }
 

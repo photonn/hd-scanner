@@ -153,26 +153,30 @@ class ScanCancelledError extends Error {
 }
 
 // ── Recursive folder scanner ─────────────────────────────────────────────────
+// The returned node (and every child node) is mutated in place as the scan
+// progresses (size/children fill in incrementally), rather than only being
+// populated once the whole subtree resolves. This lets the caller take live
+// snapshots of an in-progress scan for real-time rendering.
 async function scanDirectory(
   dirPath: string,
   signal: AbortSignal,
   excludes: CompiledExcludes,
-  onProgress?: (scanned: string) => void
+  onProgress?: (scanned: string) => void,
+  onRootCreated?: (node: FolderNode) => void
 ): Promise<FolderNode> {
   if (signal.aborted) throw new ScanCancelledError()
 
   const name = dirPath.split(/[\\/]/).pop() || dirPath
+  const node: FolderNode = { name, path: dirPath, size: 0, children: [], errorCount: 0 }
+  if (onRootCreated) onRootCreated(node)
 
   let entries: Awaited<ReturnType<typeof fs.readdir>>
   try {
     entries = await fs.readdir(dirPath, { withFileTypes: true })
   } catch {
-    return { name, path: dirPath, size: 0, children: [], errorCount: 1 }
+    node.errorCount = 1
+    return node
   }
-
-  const children: FolderNode[] = []
-  let size = 0
-  let errorCount = 0
 
   const tasks = entries.map(async (entry) => {
     if (signal.aborted) return
@@ -183,27 +187,29 @@ async function scanDirectory(
       if (entry.isDirectory()) {
         if (onProgress) onProgress(fullPath)
         const child = await scanDirectory(fullPath, signal, excludes, onProgress)
-        children.push(child)
-        size += child.size
-        errorCount += child.errorCount
+        node.children.push(child)
+        node.size += child.size
+        node.errorCount += child.errorCount
       } else if (entry.isFile()) {
         const stat = await fs.stat(fullPath)
-        size += stat.size
+        node.size += stat.size
       }
     } catch {
-      errorCount += 1
+      node.errorCount += 1
     }
   })
 
   await Promise.allSettled(tasks)
   if (signal.aborted) throw new ScanCancelledError()
 
-  children.sort((a, b) => b.size - a.size)
+  node.children.sort((a, b) => b.size - a.size)
 
-  return { name, path: dirPath, size, children, errorCount }
+  return node
 }
 
-// ── IPC: scan a directory, streaming progress ────────────────────────────────
+// ── IPC: scan a directory, streaming progress + live snapshots ──────────────
+const SNAPSHOT_INTERVAL_MS = 400
+
 ipcMain.handle(
   'fs:scanDirectory',
   async (event, dirPath: string, scanId: string, excludes: string[] = []) => {
@@ -214,9 +220,23 @@ ipcMain.handle(
       event.sender.send('fs:scanProgress', scanned)
     }
 
+    let rootNode: FolderNode | null = null
+    const snapshotTimer = setInterval(() => {
+      if (rootNode) event.sender.send('fs:scanSnapshot', structuredClone(rootNode))
+    }, SNAPSHOT_INTERVAL_MS)
+
     try {
-      return await scanDirectory(dirPath, controller.signal, compileExcludes(excludes), onProgress)
+      return await scanDirectory(
+        dirPath,
+        controller.signal,
+        compileExcludes(excludes),
+        onProgress,
+        (node) => {
+          rootNode = node
+        }
+      )
     } finally {
+      clearInterval(snapshotTimer)
       activeScans.delete(scanId)
     }
   }

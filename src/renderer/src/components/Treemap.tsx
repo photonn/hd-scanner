@@ -13,6 +13,9 @@ interface Props {
   root: FolderNode
   onNavigate: (node: FolderNode) => void
   onContextMenu?: (node: FolderNode, clientX: number, clientY: number) => void
+  expandedPath: FolderNode[]
+  onExpandPath: (path: FolderNode[]) => void
+  interactive: boolean
 }
 
 function formatSize(bytes: number): string {
@@ -52,61 +55,87 @@ interface RenderNode {
 }
 
 /**
- * Recursively build a flat list of rectangles to render, subdividing folders
- * whose tiles are large enough to show children.
+ * Lay out one level of tiles for `parent`'s direct children. If the child
+ * at this depth matches `expandedPath[depth]`, recurse one level deeper
+ * nested inside that child's rect — and so on for however long the path
+ * continues. Each single click extends/shortens this path by one level
+ * (matroska-style), so there's no fixed nesting limit other than available
+ * pixel area.
  */
-function buildRects(
-  node: FolderNode,
+function layoutLevel(
+  parent: FolderNode,
   x: number,
   y: number,
   w: number,
   h: number,
   depth: number,
-  colorIdx: number,
-  MIN_CHILD_AREA = 600
+  expandedPath: FolderNode[],
+  baseColorIdx: number
 ): RenderNode[] {
-  const rects: RenderNode[] = [{ node, x, y, width: w, height: h, colorIdx, depth }]
-
-  const children = node.children.filter((c) => c.size > 0)
-  if (children.length === 0 || w * h < MIN_CHILD_AREA) return rects
-
-  const PADDING = 2
-  const HEADER = Math.min(18, h * 0.15)
-  const innerX = x + PADDING
-  const innerY = y + HEADER
-  const innerW = w - PADDING * 2
-  const innerH = h - HEADER - PADDING
-
-  if (innerW <= 0 || innerH <= 0) return rects
+  const rects: RenderNode[] = []
+  const children = parent.children.filter((c) => c.size > 0)
+  if (children.length === 0) return rects
 
   const layout = squarifiedTreemap(
     children.map((c) => ({ value: c.size })),
-    innerX,
-    innerY,
-    innerW,
-    innerH
+    x,
+    y,
+    w,
+    h
   )
 
   for (let i = 0; i < children.length; i++) {
     const r = layout[i]
     if (!r || r.width < 1 || r.height < 1) continue
-    const childRects = buildRects(
-      children[i],
-      r.x,
-      r.y,
-      r.width,
-      r.height,
-      depth + 1,
-      (colorIdx + i + 1) % PALETTE.length,
-      MIN_CHILD_AREA
-    )
-    rects.push(...childRects)
+    const child = children[i]
+    const colorIdx = (baseColorIdx + i) % PALETTE.length
+    rects.push({ node: child, x: r.x, y: r.y, width: r.width, height: r.height, colorIdx, depth })
+
+    if (expandedPath[depth] === child) {
+      const PADDING = 2
+      const HEADER = Math.min(18, r.height * 0.15)
+      const innerX = r.x + PADDING
+      const innerY = r.y + HEADER
+      const innerW = r.width - PADDING * 2
+      const innerH = r.height - HEADER - PADDING
+      if (innerW > 0 && innerH > 0) {
+        const nested = layoutLevel(
+          child,
+          innerX,
+          innerY,
+          innerW,
+          innerH,
+          depth + 1,
+          expandedPath,
+          colorIdx + 1
+        )
+        rects.push(...nested)
+      }
+    }
   }
 
   return rects
 }
 
-const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) => {
+function buildRects(
+  root: FolderNode,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  expandedPath: FolderNode[]
+): RenderNode[] {
+  return layoutLevel(root, x, y, w, h, 0, expandedPath, 0)
+}
+
+const TreemapComponent: React.FC<Props> = ({
+  root,
+  onNavigate,
+  onContextMenu,
+  expandedPath,
+  onExpandPath,
+  interactive
+}) => {
   const canvasRef = useRef<HTMLCanvasElement>(null)
   const wrapperRef = useRef<HTMLDivElement>(null)
   const rectsRef = useRef<RenderNode[]>([])
@@ -122,10 +151,10 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) 
     ctx.clearRect(0, 0, width, height)
 
     // Build layout
-    const allRects = buildRects(root, 0, 0, width, height, 0, 0)
+    const allRects = buildRects(root, 0, 0, width, height, expandedPath)
     rectsRef.current = allRects
 
-    // Draw from shallowest to deepest so child tiles paint over their parent (painter's algorithm)
+    // Draw shallow tiles first so the expanded child's nested tiles paint over it
     const sorted = [...allRects].sort((a, b) => a.depth - b.depth)
 
     for (const r of sorted) {
@@ -159,7 +188,7 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) 
         }
       }
     }
-  }, [root])
+  }, [root, expandedPath])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -196,17 +225,40 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) 
 
   const handleClick = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!interactive) return
       const canvas = canvasRef.current
       if (!canvas) return
       const rect = canvas.getBoundingClientRect()
       const x = e.clientX - rect.left
       const y = e.clientY - rect.top
       const hit = getNodeAt(x, y)
-      if (hit && hit.node !== root && hit.node.children.length > 0) {
+      if (!hit || hit.node.children.length === 0) return
+      // Clicking the tile already expanded at this depth collapses it (and
+      // anything nested deeper); clicking any other tile expands it one
+      // level further, discarding whatever was expanded below the old path.
+      if (expandedPath[hit.depth] === hit.node) {
+        onExpandPath(expandedPath.slice(0, hit.depth))
+      } else {
+        onExpandPath([...expandedPath.slice(0, hit.depth), hit.node])
+      }
+    },
+    [getNodeAt, onExpandPath, expandedPath, interactive]
+  )
+
+  const handleDoubleClick = useCallback(
+    (e: React.MouseEvent<HTMLCanvasElement>) => {
+      if (!interactive) return
+      const canvas = canvasRef.current
+      if (!canvas) return
+      const rect = canvas.getBoundingClientRect()
+      const x = e.clientX - rect.left
+      const y = e.clientY - rect.top
+      const hit = getNodeAt(x, y)
+      if (hit && hit.node.children.length > 0) {
         onNavigate(hit.node)
       }
     },
-    [getNodeAt, onNavigate, root]
+    [getNodeAt, onNavigate, interactive]
   )
 
   const handleMouseMove = useCallback(
@@ -242,14 +294,13 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) 
         tooltip.style.left = `${Math.max(wrapperRect.left, left)}px`
         tooltip.style.top = `${Math.max(wrapperRect.top, top)}px`
 
-        canvas.style.cursor =
-          hit.node !== root && hit.node.children.length > 0 ? 'pointer' : 'default'
+        canvas.style.cursor = interactive && hit.node.children.length > 0 ? 'pointer' : 'default'
       } else {
         tooltip.style.display = 'none'
         canvas.style.cursor = 'default'
       }
     },
-    [getNodeAt, root]
+    [getNodeAt, interactive]
   )
 
   const handleMouseLeave = useCallback(() => {
@@ -260,6 +311,7 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) 
   const handleContextMenuEvent = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
       e.preventDefault()
+      if (!interactive) return
       const canvas = canvasRef.current
       if (!canvas || !onContextMenu) return
       const rect = canvas.getBoundingClientRect()
@@ -268,7 +320,7 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) 
       const hit = getNodeAt(x, y)
       if (hit) onContextMenu(hit.node, e.clientX, e.clientY)
     },
-    [getNodeAt, onContextMenu]
+    [getNodeAt, onContextMenu, interactive]
   )
 
   return (
@@ -277,6 +329,7 @@ const TreemapComponent: React.FC<Props> = ({ root, onNavigate, onContextMenu }) 
         ref={canvasRef}
         className="treemap-canvas"
         onClick={handleClick}
+        onDoubleClick={handleDoubleClick}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
         onContextMenu={handleContextMenuEvent}
