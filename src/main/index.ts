@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import { join } from 'path'
 import { promises as fs } from 'fs'
-import { statSync, readdirSync } from 'fs'
+import { statSync, readdirSync, type Dirent } from 'fs'
 
 function createWindow(): void {
   const mainWindow = new BrowserWindow({
@@ -170,9 +170,9 @@ async function scanDirectory(
   const node: FolderNode = { name, path: dirPath, size: 0, children: [], errorCount: 0 }
   if (onRootCreated) onRootCreated(node)
 
-  let entries: Awaited<ReturnType<typeof fs.readdir>>
+  let entries: Dirent<string>[]
   try {
-    entries = await fs.readdir(dirPath, { withFileTypes: true })
+    entries = await fs.readdir(dirPath, { withFileTypes: true, encoding: 'utf8' })
   } catch {
     node.errorCount = 1
     return node
