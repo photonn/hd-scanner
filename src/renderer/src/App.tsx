@@ -70,6 +70,12 @@ const App: React.FC = () => {
   const [heartbeat, setHeartbeat] = useState<ScanHeartbeat | null>(null)
 
   const scanIdRef = useRef<string | null>(null)
+  // Heartbeat events fire once a second for the life of every scan, so they
+  // read this ref (rather than the `debugMode` state captured when the scan
+  // started) to decide whether to re-render/log — this keeps a mid-scan
+  // toggle effective immediately and avoids a state update + re-render every
+  // second when debug mode is off.
+  const debugModeRef = useRef(debugMode)
 
   useEffect(() => {
     window.api.listDrives().then(setDrives).catch(console.error)
@@ -78,6 +84,7 @@ const App: React.FC = () => {
   // Keep main-process logging in sync with the toggle, and persist it across
   // restarts so a debug session survives an app reload.
   useEffect(() => {
+    debugModeRef.current = debugMode
     localStorage.setItem('hd-scanner:debug', debugMode ? '1' : '0')
     void window.api.setDebugMode(debugMode).catch(console.error)
   }, [debugMode])
@@ -115,19 +122,19 @@ const App: React.FC = () => {
 
       const scanId = crypto.randomUUID()
       scanIdRef.current = scanId
-      if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] starting`, dirPath)
+      if (debugModeRef.current) console.log(`[scan:${scanId.slice(0, 8)}] starting`, dirPath)
 
       // Stale events from a superseded/cancelled scan must not clobber the
       // current scan's state, so ignore anything not tagged with this scanId.
       const unsubProgress = window.api.onScanProgress((id, p) => {
         if (id !== scanId) return
         setScanningPath(p)
-        if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] progress`, p)
+        if (debugModeRef.current) console.log(`[scan:${scanId.slice(0, 8)}] progress`, p)
       })
       const unsubSnapshot = window.api.onScanSnapshot((id, node) => {
         if (id !== scanId) return
         setRootData(node)
-        if (debugMode)
+        if (debugModeRef.current)
           console.log(
             `[scan:${scanId.slice(0, 8)}] snapshot`,
             `size=${node.size}`,
@@ -136,17 +143,20 @@ const App: React.FC = () => {
       })
       const unsubHeartbeat = window.api.onScanHeartbeat((id, hb) => {
         if (id !== scanId) return
+        // Skip the re-render entirely when debug mode is off — the panel
+        // that would display this state isn't even rendered.
+        if (!debugModeRef.current) return
         setHeartbeat(hb)
-        if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] heartbeat`, hb)
+        console.log(`[scan:${scanId.slice(0, 8)}] heartbeat`, hb)
       })
       try {
         const result = await window.api.scanDirectory(dirPath, scanId, parseExcludes(excludeInput))
         setRootData(result)
         setState('done')
-        if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] done`)
+        if (debugModeRef.current) console.log(`[scan:${scanId.slice(0, 8)}] done`)
       } catch (err) {
         const message = String(err)
-        if (debugMode) console.log(`[scan:${scanId.slice(0, 8)}] ended:`, message)
+        if (debugModeRef.current) console.log(`[scan:${scanId.slice(0, 8)}] ended:`, message)
         // A cancelled scan is an expected outcome, not a failure — don't surface an error.
         if (!message.toLowerCase().includes('cancelled')) setError(message)
         setState('idle')
@@ -158,7 +168,7 @@ const App: React.FC = () => {
         setHeartbeat(null)
       }
     },
-    [excludeInput, debugMode]
+    [excludeInput]
   )
 
   const handleCancelScan = useCallback(() => {

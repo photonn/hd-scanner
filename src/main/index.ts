@@ -237,6 +237,11 @@ async function scanDirectory(
     if (isExcluded(entry.name, excludes)) return
     const fullPath = join(dirPath, entry.name)
     stats.activeOps += 1
+    // Record the path being entered *before* awaiting the (possibly hanging)
+    // fs call, not just in `finally` once it resolves — otherwise the
+    // heartbeat keeps reporting the previous path while stuck on this one.
+    stats.lastPath = fullPath
+    stats.lastActivityAt = Date.now()
     try {
       if (entry.isSymbolicLink()) return
       if (entry.isDirectory()) {
@@ -254,7 +259,6 @@ async function scanDirectory(
       if (!signal.aborted) node.errorCount += 1
     } finally {
       stats.activeOps -= 1
-      stats.lastPath = fullPath
       stats.lastActivityAt = Date.now()
     }
   })
