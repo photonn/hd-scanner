@@ -1,8 +1,12 @@
 // fs.promises.readdir/stat run on libuv's thread pool, which defaults to 4
 // threads — far below what the Workers cap (up to 64) is meant to allow on
-// fast NVMe drives. Must be set before the first async fs call (the pool is
-// created lazily on first use), so this needs to happen at module load.
-process.env.UV_THREADPOOL_SIZE = '64'
+// fast NVMe drives. Only set a default if the environment hasn't already
+// configured one, so explicit user/platform tuning still wins. Must happen
+// before the first async fs call (the pool is created lazily on first use),
+// so this needs to be at module load.
+if (!process.env.UV_THREADPOOL_SIZE) {
+  process.env.UV_THREADPOOL_SIZE = '64'
+}
 
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import { join } from 'path'
