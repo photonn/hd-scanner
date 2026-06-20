@@ -54,8 +54,8 @@ function parseExcludes(raw: string): string[] {
     .filter(Boolean)
 }
 
-const MIN_CONCURRENCY = 1
-const MAX_CONCURRENCY = 50
+const MIN_CONCURRENCY = 5
+const MAX_CONCURRENCY = 64
 const DEFAULT_CONCURRENCY = 10
 
 function loadStoredConcurrency(): number {

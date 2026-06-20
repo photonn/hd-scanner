@@ -1,3 +1,9 @@
+// fs.promises.readdir/stat run on libuv's thread pool, which defaults to 4
+// threads — far below what the Workers cap (up to 64) is meant to allow on
+// fast NVMe drives. Must be set before the first async fs call (the pool is
+// created lazily on first use), so this needs to happen at module load.
+process.env.UV_THREADPOOL_SIZE = '64'
+
 import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron'
 import { join } from 'path'
 import { promises as fs } from 'fs'
@@ -211,7 +217,8 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 // sends over IPC. The renderer's slider already clamps to this same value,
 // but the IPC argument is renderer-controlled input — clamp again here so a
 // stray/compromised value can't remove the global fs-op cap entirely.
-const MAX_CONCURRENT = 50
+const MAX_CONCURRENT = 64
+const MIN_CONCURRENT = 5
 
 class Semaphore {
   private capacity: number
@@ -264,8 +271,8 @@ class Semaphore {
   }
 
   private static sanitize(capacity: number): number {
-    if (!Number.isFinite(capacity)) return 1
-    return Math.min(MAX_CONCURRENT, Math.max(1, Math.floor(capacity)))
+    if (!Number.isFinite(capacity)) return MIN_CONCURRENT
+    return Math.min(MAX_CONCURRENT, Math.max(MIN_CONCURRENT, Math.floor(capacity)))
   }
 }
 
