@@ -54,16 +54,17 @@ function parseExcludes(raw: string): string[] {
     .filter(Boolean)
 }
 
-const MIN_CONCURRENCY = 1
-const MAX_CONCURRENCY = 50
+const MIN_CONCURRENCY = 5
+const MAX_CONCURRENCY = 64
 const DEFAULT_CONCURRENCY = 10
 
 function loadStoredConcurrency(): number {
   const stored = Number(localStorage.getItem('hd-scanner:maxConcurrency'))
-  if (Number.isFinite(stored) && stored >= MIN_CONCURRENCY && stored <= MAX_CONCURRENCY) {
-    return stored
-  }
-  return DEFAULT_CONCURRENCY
+  // Clamp into range rather than discarding — a value stored under an older,
+  // wider MIN/MAX (e.g. 1-4 from before the floor was raised to 5) should
+  // land at the new floor, not silently jump up to DEFAULT_CONCURRENCY.
+  if (!Number.isFinite(stored)) return DEFAULT_CONCURRENCY
+  return Math.min(MAX_CONCURRENCY, Math.max(MIN_CONCURRENCY, stored))
 }
 
 interface ContextMenuState {
