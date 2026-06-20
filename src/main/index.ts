@@ -142,12 +142,12 @@ function isExcluded(name: string, compiled: CompiledExcludes): boolean {
   return compiled.regexes.some((re) => re.test(lower))
 }
 
-// ── Active scan tracking (for cancellation) ──────────────────────────────────
-const activeScans = new Map<string, AbortController>()
-// Tracked separately (rather than alongside the controller) so a concurrency
-// change from the renderer can reach a scan's semaphore without the rest of
-// the cancellation plumbing knowing about it.
-const activeSemaphores = new Map<string, Semaphore>()
+// ── Active scan tracking (for cancellation + live concurrency changes) ──────
+interface ActiveScan {
+  controller: AbortController
+  semaphore: Semaphore
+}
+const activeScans = new Map<string, ActiveScan>()
 
 // ── Debug mode ────────────────────────────────────────────────────────────────
 // Toggled from the renderer so the user can watch what a scan is doing in the
@@ -318,9 +318,9 @@ async function runLimited<T>(
 // populated once the whole subtree resolves. This lets the caller take live
 // snapshots of an in-progress scan for real-time rendering.
 
-// Default max concurrent filesystem operations across the whole scan. A
-// value of 10 keeps the system responsive even on trees with thousands of
-// entries spread across many directories.
+// IPC arguments are untyped at runtime — a missing/non-finite maxConcurrency
+// here falls back to this rather than Semaphore.sanitize()'s floor of 1,
+// which would otherwise throttle a scan to a crawl with no clear cause.
 const DEFAULT_MAX_CONCURRENT = 10
 
 async function scanDirectory(
@@ -409,9 +409,8 @@ ipcMain.handle(
     maxConcurrency: number = DEFAULT_MAX_CONCURRENT
   ) => {
     const controller = new AbortController()
-    activeScans.set(scanId, controller)
     const semaphore = new Semaphore(maxConcurrency)
-    activeSemaphores.set(scanId, semaphore)
+    activeScans.set(scanId, { controller, semaphore })
 
     const safeSend = (channel: string, ...args: unknown[]): void => {
       if (!event.sender.isDestroyed()) event.sender.send(channel, ...args)
@@ -484,20 +483,17 @@ ipcMain.handle(
       clearInterval(snapshotTimer)
       clearInterval(heartbeatTimer)
       activeScans.delete(scanId)
-      activeSemaphores.delete(scanId)
     }
   }
 )
 
 ipcMain.handle('fs:setScanConcurrency', (_event, scanId: string, maxConcurrency: number) => {
-  const semaphore = activeSemaphores.get(scanId)
-  if (semaphore) semaphore.setCapacity(maxConcurrency)
+  activeScans.get(scanId)?.semaphore.setCapacity(maxConcurrency)
 })
 
 ipcMain.handle('fs:cancelScan', (_event, scanId: string) => {
   debugLog(scanId, 'cancel requested')
-  const controller = activeScans.get(scanId)
-  if (controller) controller.abort()
+  activeScans.get(scanId)?.controller.abort()
 })
 
 ipcMain.handle('fs:setDebugMode', (_event, enabled: boolean) => {
