@@ -202,10 +202,11 @@ async function limitedAllSettled<T>(
   promises: Promise<T>[],
   concurrency: number
 ): Promise<PromiseSettledResult<T>[]> {
+  const limit = Number.isFinite(concurrency) ? Math.max(1, Math.floor(concurrency)) : 1
   const results: PromiseSettledResult<T>[] = new Array(promises.length)
 
-  for (let i = 0; i < promises.length; i += concurrency) {
-    const batch = promises.slice(i, i + concurrency)
+  for (let i = 0; i < promises.length; i += limit) {
+    const batch = promises.slice(i, i + limit)
     const batchResults = await Promise.allSettled(batch)
     for (let bi = 0; bi < batchResults.length; bi++) {
       results[i + bi] = batchResults[bi]
