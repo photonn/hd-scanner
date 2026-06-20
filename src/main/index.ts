@@ -318,6 +318,11 @@ async function runLimited<T>(
 // populated once the whole subtree resolves. This lets the caller take live
 // snapshots of an in-progress scan for real-time rendering.
 
+// IPC arguments are untyped at runtime — a missing/non-finite maxConcurrency
+// here falls back to this rather than Semaphore.sanitize()'s floor of 1,
+// which would otherwise throttle a scan to a crawl with no clear cause.
+const DEFAULT_MAX_CONCURRENT = 10
+
 async function scanDirectory(
   dirPath: string,
   signal: AbortSignal,
@@ -401,7 +406,7 @@ ipcMain.handle(
     dirPath: string,
     scanId: string,
     excludes: string[] = [],
-    maxConcurrency: number
+    maxConcurrency: number = DEFAULT_MAX_CONCURRENT
   ) => {
     const controller = new AbortController()
     const semaphore = new Semaphore(maxConcurrency)
