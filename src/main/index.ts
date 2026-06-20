@@ -193,18 +193,46 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   })
 }
 
+// ── Concurrency-limited parallel execution ───────────────────────────────────
+// Instead of launching every entry as a concurrent task (which causes
+// unresponsiveness on large folders), we process entries in batches of
+// `concurrency` — each batch fully settles before the next one starts.
+// Accepts an array of *already-started* promises and settles them in batches.
+async function limitedAllSettled<T>(
+  promises: Promise<T>[],
+  concurrency: number
+): Promise<PromiseSettledResult<T>[]> {
+  const results: PromiseSettledResult<T>[] = new Array(promises.length)
+
+  for (let i = 0; i < promises.length; i += concurrency) {
+    const batch = promises.slice(i, i + concurrency)
+    const batchResults = await Promise.allSettled(batch)
+    for (let bi = 0; bi < batchResults.length; bi++) {
+      results[i + bi] = batchResults[bi]
+    }
+  }
+
+  return results
+}
+
 // ── Recursive folder scanner ─────────────────────────────────────────────────
 // The returned node (and every child node) is mutated in place as the scan
 // progresses (size/children fill in incrementally), rather than only being
 // populated once the whole subtree resolves. This lets the caller take live
 // snapshots of an in-progress scan for real-time rendering.
+
+// Default max concurrent filesystem operations per directory.  A value of 10
+// keeps the system responsive even when a directory has thousands of entries.
+const DEFAULT_MAX_CONCURRENT = 10
+
 async function scanDirectory(
   dirPath: string,
   signal: AbortSignal,
   excludes: CompiledExcludes,
   stats: ScanStats,
   onProgress?: (scanned: string) => void,
-  onRootCreated?: (node: FolderNode) => void
+  onRootCreated?: (node: FolderNode) => void,
+  maxConcurrent: number = DEFAULT_MAX_CONCURRENT
 ): Promise<FolderNode> {
   if (signal.aborted) throw new ScanCancelledError()
 
@@ -246,7 +274,7 @@ async function scanDirectory(
       if (entry.isSymbolicLink()) return
       if (entry.isDirectory()) {
         if (onProgress) onProgress(fullPath)
-        const child = await scanDirectory(fullPath, signal, excludes, stats, onProgress)
+        const child = await scanDirectory(fullPath, signal, excludes, stats, onProgress, undefined, maxConcurrent)
         node.children.push(child)
         node.size += child.size
         node.errorCount += child.errorCount
@@ -263,7 +291,7 @@ async function scanDirectory(
     }
   })
 
-  await Promise.allSettled(tasks)
+  await limitedAllSettled(tasks, maxConcurrent)
   if (signal.aborted) throw new ScanCancelledError()
 
   node.children.sort((a, b) => b.size - a.size)
