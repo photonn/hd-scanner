@@ -144,6 +144,10 @@ function isExcluded(name: string, compiled: CompiledExcludes): boolean {
 
 // ── Active scan tracking (for cancellation) ──────────────────────────────────
 const activeScans = new Map<string, AbortController>()
+// Tracked separately (rather than alongside the controller) so a concurrency
+// change from the renderer can reach a scan's semaphore without the rest of
+// the cancellation plumbing knowing about it.
+const activeSemaphores = new Map<string, Semaphore>()
 
 // ── Debug mode ────────────────────────────────────────────────────────────────
 // Toggled from the renderer so the user can watch what a scan is doing in the
@@ -193,34 +197,119 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   })
 }
 
-// ── Concurrency-limited parallel execution ───────────────────────────────────
-// Accepts an array of promise *factories* (functions that return a promise) and
-// runs at most `concurrency` of them concurrently via a worker-pool pattern.
-// Factories are not called until a worker slot is free, so at most `concurrency`
-// filesystem operations are in-flight at any time.
-async function limitedAllSettled<T>(
-  factories: Array<() => Promise<T>>,
-  concurrency: number
-): Promise<PromiseSettledResult<T>[]> {
-  const limit = Number.isFinite(concurrency) ? Math.max(1, Math.floor(concurrency)) : 1
-  const results: PromiseSettledResult<T>[] = new Array(factories.length)
-  let nextIndex = 0
+// ── Global concurrency limiter for filesystem syscalls ───────────────────────
+// One Semaphore instance is created per scan (see `fs:scanDirectory` below)
+// and threaded through every recursive scanDirectory call, gating only the
+// actual readdir/stat syscalls. This caps the number of in-flight fs
+// operations across the *entire* tree at once. Creating a fresh limiter
+// inside each recursive call (the previous approach) only bounds fan-out
+// within one directory's immediate children — nesting still multiplies
+// concurrency by the branching factor at every level, so any tree with real
+// depth/width still floods the OS with thousands of concurrent operations.
 
-  async function worker(): Promise<void> {
-    while (nextIndex < factories.length) {
-      const index = nextIndex++
-      try {
-        results[index] = { status: 'fulfilled', value: await factories[index]() }
-      } catch (err) {
-        results[index] = { status: 'rejected', reason: err }
-      }
+// Hard ceiling on the concurrency cap, independent of whatever the renderer
+// sends over IPC. The renderer's slider already clamps to this same value,
+// but the IPC argument is renderer-controlled input — clamp again here so a
+// stray/compromised value can't remove the global fs-op cap entirely.
+const MAX_CONCURRENT = 50
+
+class Semaphore {
+  private capacity: number
+  private inUse = 0
+  private readonly queue: Array<() => void> = []
+
+  constructor(capacity: number) {
+    this.capacity = Semaphore.sanitize(capacity)
+  }
+
+  // Current cap, exposed so callers can size a companion per-directory
+  // dispatch limit (see `runLimited` below) without duplicating the knob.
+  get limit(): number {
+    return this.capacity
+  }
+
+  // Lets the renderer raise/lower the cap on an already-running scan. Raising
+  // it immediately wakes queued waiters up to the new capacity; lowering it
+  // can't preempt syscalls already in flight, but throttles new ones until
+  // `inUse` drops back under the new capacity.
+  setCapacity(capacity: number): void {
+    this.capacity = Semaphore.sanitize(capacity)
+    this.drain()
+  }
+
+  acquire(): Promise<void> {
+    if (this.inUse < this.capacity) {
+      this.inUse += 1
+      return Promise.resolve()
+    }
+    return new Promise<void>((resolve) => this.queue.push(resolve))
+  }
+
+  release(): void {
+    this.inUse -= 1
+    this.drain()
+  }
+
+  // `inUse` is incremented here, synchronously, for every waiter woken —
+  // not inside the waiter's resumed `await acquire()` continuation. That
+  // continuation only runs as a later microtask, so if this loop kept
+  // checking a stale `inUse` it could wake far more waiters than there are
+  // free slots before any of them got a chance to claim one.
+  private drain(): void {
+    while (this.inUse < this.capacity && this.queue.length > 0) {
+      this.inUse += 1
+      const next = this.queue.shift()
+      if (next) next()
     }
   }
 
-  const workers = Array.from({ length: Math.min(limit, factories.length) }, () => worker())
-  await Promise.all(workers)
+  private static sanitize(capacity: number): number {
+    if (!Number.isFinite(capacity)) return 1
+    return Math.min(MAX_CONCURRENT, Math.max(1, Math.floor(capacity)))
+  }
+}
 
-  return results
+// Re-checks `signal` after acquiring the permit (not just before) — a task
+// queued on the semaphore can sit there for a while, and the scan may have
+// been cancelled during that wait. Without this check, a cancelled scan
+// would still kick off a real readdir/stat syscall the moment a slot frees
+// up, even though the result is immediately discarded.
+async function withPermit<T>(
+  semaphore: Semaphore,
+  signal: AbortSignal,
+  fn: () => Promise<T>
+): Promise<T> {
+  await semaphore.acquire()
+  try {
+    if (signal.aborted) throw new ScanCancelledError()
+    return await fn()
+  } finally {
+    semaphore.release()
+  }
+}
+
+// Bounds how many entries of *this* directory are dispatched at once. The
+// semaphore above already caps real fs syscalls globally, but without this,
+// `entries.map(...)` would still synchronously create one pending Promise
+// (and, for subdirectories, a whole recursive call) per entry — on a
+// directory with hundreds of thousands of entries that's a lot of live
+// closures sitting around just waiting on the semaphore.
+async function runLimited<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<void>
+): Promise<void> {
+  let nextIndex = 0
+
+  async function run(): Promise<void> {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex++]
+      await worker(item)
+    }
+  }
+
+  const lanes = Math.min(Math.max(1, Math.floor(concurrency)), items.length)
+  await Promise.all(Array.from({ length: lanes }, run))
 }
 
 // ── Recursive folder scanner ─────────────────────────────────────────────────
@@ -229,8 +318,9 @@ async function limitedAllSettled<T>(
 // populated once the whole subtree resolves. This lets the caller take live
 // snapshots of an in-progress scan for real-time rendering.
 
-// Default max concurrent filesystem operations per directory.  A value of 10
-// keeps the system responsive even when a directory has thousands of entries.
+// Default max concurrent filesystem operations across the whole scan. A
+// value of 10 keeps the system responsive even on trees with thousands of
+// entries spread across many directories.
 const DEFAULT_MAX_CONCURRENT = 10
 
 async function scanDirectory(
@@ -238,9 +328,9 @@ async function scanDirectory(
   signal: AbortSignal,
   excludes: CompiledExcludes,
   stats: ScanStats,
+  semaphore: Semaphore,
   onProgress?: (scanned: string) => void,
-  onRootCreated?: (node: FolderNode) => void,
-  maxConcurrent: number = DEFAULT_MAX_CONCURRENT
+  onRootCreated?: (node: FolderNode) => void
 ): Promise<FolderNode> {
   if (signal.aborted) throw new ScanCancelledError()
 
@@ -255,9 +345,8 @@ async function scanDirectory(
 
   let entries: Dirent<string>[]
   try {
-    entries = await abortable(
-      fs.readdir(dirPath, { withFileTypes: true, encoding: 'utf8' }),
-      signal
+    entries = await withPermit(semaphore, signal, () =>
+      abortable(fs.readdir(dirPath, { withFileTypes: true, encoding: 'utf8' }), signal)
     )
   } catch {
     stats.activeOps -= 1
@@ -268,7 +357,7 @@ async function scanDirectory(
   stats.activeOps -= 1
   stats.lastActivityAt = Date.now()
 
-  const tasks = entries.map((entry) => async () => {
+  await runLimited(entries, semaphore.limit, async (entry) => {
     if (signal.aborted) return
     if (isExcluded(entry.name, excludes)) return
     const fullPath = join(dirPath, entry.name)
@@ -282,12 +371,12 @@ async function scanDirectory(
       if (entry.isSymbolicLink()) return
       if (entry.isDirectory()) {
         if (onProgress) onProgress(fullPath)
-        const child = await scanDirectory(fullPath, signal, excludes, stats, onProgress, undefined, maxConcurrent)
+        const child = await scanDirectory(fullPath, signal, excludes, stats, semaphore, onProgress)
         node.children.push(child)
         node.size += child.size
         node.errorCount += child.errorCount
       } else if (entry.isFile()) {
-        const stat = await abortable(fs.stat(fullPath), signal)
+        const stat = await withPermit(semaphore, signal, () => abortable(fs.stat(fullPath), signal))
         node.size += stat.size
         stats.filesStated += 1
       }
@@ -299,7 +388,6 @@ async function scanDirectory(
     }
   })
 
-  await limitedAllSettled(tasks, maxConcurrent)
   if (signal.aborted) throw new ScanCancelledError()
 
   node.children.sort((a, b) => b.size - a.size)
@@ -313,9 +401,17 @@ const HEARTBEAT_INTERVAL_MS = 1000
 
 ipcMain.handle(
   'fs:scanDirectory',
-  async (event, dirPath: string, scanId: string, excludes: string[] = []) => {
+  async (
+    event,
+    dirPath: string,
+    scanId: string,
+    excludes: string[] = [],
+    maxConcurrency: number = DEFAULT_MAX_CONCURRENT
+  ) => {
     const controller = new AbortController()
     activeScans.set(scanId, controller)
+    const semaphore = new Semaphore(maxConcurrency)
+    activeSemaphores.set(scanId, semaphore)
 
     const safeSend = (channel: string, ...args: unknown[]): void => {
       if (!event.sender.isDestroyed()) event.sender.send(channel, ...args)
@@ -370,6 +466,7 @@ ipcMain.handle(
         controller.signal,
         compileExcludes(excludes),
         stats,
+        semaphore,
         onProgress,
         (node) => {
           rootNode = node
@@ -387,9 +484,15 @@ ipcMain.handle(
       clearInterval(snapshotTimer)
       clearInterval(heartbeatTimer)
       activeScans.delete(scanId)
+      activeSemaphores.delete(scanId)
     }
   }
 )
+
+ipcMain.handle('fs:setScanConcurrency', (_event, scanId: string, maxConcurrency: number) => {
+  const semaphore = activeSemaphores.get(scanId)
+  if (semaphore) semaphore.setCapacity(maxConcurrency)
+})
 
 ipcMain.handle('fs:cancelScan', (_event, scanId: string) => {
   debugLog(scanId, 'cancel requested')
