@@ -197,6 +197,7 @@ const App: React.FC = () => {
         // A cancelled scan is an expected outcome, not a failure — don't surface an error.
         if (!message.toLowerCase().includes('cancelled')) setError(message)
         setState('idle')
+        setRootData(null)
       } finally {
         unsubProgress()
         unsubSnapshot()
