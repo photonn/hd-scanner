@@ -194,24 +194,31 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 }
 
 // ── Concurrency-limited parallel execution ───────────────────────────────────
-// Instead of launching every entry as a concurrent task (which causes
-// unresponsiveness on large folders), we process entries in batches of
-// `concurrency` — each batch fully settles before the next one starts.
-// Accepts an array of *already-started* promises and settles them in batches.
+// Accepts an array of promise *factories* (functions that return a promise) and
+// runs at most `concurrency` of them concurrently via a worker-pool pattern.
+// Factories are not called until a worker slot is free, so at most `concurrency`
+// filesystem operations are in-flight at any time.
 async function limitedAllSettled<T>(
-  promises: Promise<T>[],
+  factories: Array<() => Promise<T>>,
   concurrency: number
 ): Promise<PromiseSettledResult<T>[]> {
   const limit = Number.isFinite(concurrency) ? Math.max(1, Math.floor(concurrency)) : 1
-  const results: PromiseSettledResult<T>[] = new Array(promises.length)
+  const results: PromiseSettledResult<T>[] = new Array(factories.length)
+  let nextIndex = 0
 
-  for (let i = 0; i < promises.length; i += limit) {
-    const batch = promises.slice(i, i + limit)
-    const batchResults = await Promise.allSettled(batch)
-    for (let bi = 0; bi < batchResults.length; bi++) {
-      results[i + bi] = batchResults[bi]
+  async function worker(): Promise<void> {
+    while (nextIndex < factories.length) {
+      const index = nextIndex++
+      try {
+        results[index] = { status: 'fulfilled', value: await factories[index]() }
+      } catch (err) {
+        results[index] = { status: 'rejected', reason: err }
+      }
     }
   }
+
+  const workers = Array.from({ length: Math.min(limit, factories.length) }, () => worker())
+  await Promise.all(workers)
 
   return results
 }
@@ -261,7 +268,7 @@ async function scanDirectory(
   stats.activeOps -= 1
   stats.lastActivityAt = Date.now()
 
-  const tasks = entries.map(async (entry) => {
+  const tasks = entries.map((entry) => async () => {
     if (signal.aborted) return
     if (isExcluded(entry.name, excludes)) return
     const fullPath = join(dirPath, entry.name)
