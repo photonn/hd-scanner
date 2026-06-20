@@ -193,18 +193,54 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
   })
 }
 
+// ── Concurrency-limited parallel execution ───────────────────────────────────
+// Accepts an array of promise *factories* (functions that return a promise) and
+// runs at most `concurrency` of them concurrently via a worker-pool pattern.
+// Factories are not called until a worker slot is free, so at most `concurrency`
+// filesystem operations are in-flight at any time.
+async function limitedAllSettled<T>(
+  factories: Array<() => Promise<T>>,
+  concurrency: number
+): Promise<PromiseSettledResult<T>[]> {
+  const limit = Number.isFinite(concurrency) ? Math.max(1, Math.floor(concurrency)) : 1
+  const results: PromiseSettledResult<T>[] = new Array(factories.length)
+  let nextIndex = 0
+
+  async function worker(): Promise<void> {
+    while (nextIndex < factories.length) {
+      const index = nextIndex++
+      try {
+        results[index] = { status: 'fulfilled', value: await factories[index]() }
+      } catch (err) {
+        results[index] = { status: 'rejected', reason: err }
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, factories.length) }, () => worker())
+  await Promise.all(workers)
+
+  return results
+}
+
 // ── Recursive folder scanner ─────────────────────────────────────────────────
 // The returned node (and every child node) is mutated in place as the scan
 // progresses (size/children fill in incrementally), rather than only being
 // populated once the whole subtree resolves. This lets the caller take live
 // snapshots of an in-progress scan for real-time rendering.
+
+// Default max concurrent filesystem operations per directory.  A value of 10
+// keeps the system responsive even when a directory has thousands of entries.
+const DEFAULT_MAX_CONCURRENT = 10
+
 async function scanDirectory(
   dirPath: string,
   signal: AbortSignal,
   excludes: CompiledExcludes,
   stats: ScanStats,
   onProgress?: (scanned: string) => void,
-  onRootCreated?: (node: FolderNode) => void
+  onRootCreated?: (node: FolderNode) => void,
+  maxConcurrent: number = DEFAULT_MAX_CONCURRENT
 ): Promise<FolderNode> {
   if (signal.aborted) throw new ScanCancelledError()
 
@@ -232,7 +268,7 @@ async function scanDirectory(
   stats.activeOps -= 1
   stats.lastActivityAt = Date.now()
 
-  const tasks = entries.map(async (entry) => {
+  const tasks = entries.map((entry) => async () => {
     if (signal.aborted) return
     if (isExcluded(entry.name, excludes)) return
     const fullPath = join(dirPath, entry.name)
@@ -246,7 +282,7 @@ async function scanDirectory(
       if (entry.isSymbolicLink()) return
       if (entry.isDirectory()) {
         if (onProgress) onProgress(fullPath)
-        const child = await scanDirectory(fullPath, signal, excludes, stats, onProgress)
+        const child = await scanDirectory(fullPath, signal, excludes, stats, onProgress, undefined, maxConcurrent)
         node.children.push(child)
         node.size += child.size
         node.errorCount += child.errorCount
@@ -263,7 +299,7 @@ async function scanDirectory(
     }
   })
 
-  await Promise.allSettled(tasks)
+  await limitedAllSettled(tasks, maxConcurrent)
   if (signal.aborted) throw new ScanCancelledError()
 
   node.children.sort((a, b) => b.size - a.size)
