@@ -17,8 +17,14 @@ declare global {
     api: {
       openFolder: () => Promise<string | null>
       listDrives: () => Promise<string[]>
-      scanDirectory: (path: string, scanId: string, excludes: string[]) => Promise<FolderNode>
+      scanDirectory: (
+        path: string,
+        scanId: string,
+        excludes: string[],
+        maxConcurrency: number
+      ) => Promise<FolderNode>
       cancelScan: (scanId: string) => Promise<void>
+      setScanConcurrency: (scanId: string, maxConcurrency: number) => Promise<void>
       setDebugMode: (enabled: boolean) => Promise<void>
       revealInFolder: (itemPath: string) => Promise<void>
       trashItem: (itemPath: string, itemName: string) => Promise<{ deleted: boolean }>
@@ -48,6 +54,18 @@ function parseExcludes(raw: string): string[] {
     .filter(Boolean)
 }
 
+const MIN_CONCURRENCY = 1
+const MAX_CONCURRENCY = 50
+const DEFAULT_CONCURRENCY = 10
+
+function loadStoredConcurrency(): number {
+  const stored = Number(localStorage.getItem('hd-scanner:maxConcurrency'))
+  if (Number.isFinite(stored) && stored >= MIN_CONCURRENCY && stored <= MAX_CONCURRENCY) {
+    return stored
+  }
+  return DEFAULT_CONCURRENCY
+}
+
 interface ContextMenuState {
   node: FolderNode
   x: number
@@ -68,6 +86,7 @@ const App: React.FC = () => {
     () => localStorage.getItem('hd-scanner:debug') === '1'
   )
   const [heartbeat, setHeartbeat] = useState<ScanHeartbeat | null>(null)
+  const [maxConcurrency, setMaxConcurrency] = useState<number>(loadStoredConcurrency)
 
   const scanIdRef = useRef<string | null>(null)
   // Heartbeat events fire once a second for the life of every scan, so they
@@ -91,6 +110,19 @@ const App: React.FC = () => {
 
   const handleToggleDebug = useCallback(() => {
     setDebugMode((prev) => !prev)
+  }, [])
+
+  // Persist the chosen worker cap and, if a scan is currently running, push
+  // it live to that scan's semaphore — no need to wait for the next scan.
+  useEffect(() => {
+    localStorage.setItem('hd-scanner:maxConcurrency', String(maxConcurrency))
+    if (scanIdRef.current) {
+      void window.api.setScanConcurrency(scanIdRef.current, maxConcurrency).catch(console.error)
+    }
+  }, [maxConcurrency])
+
+  const handleConcurrencyChange = useCallback((value: number) => {
+    setMaxConcurrency(value)
   }, [])
 
   // Cancel any in-flight scan if the component unmounts mid-scan.
@@ -150,7 +182,12 @@ const App: React.FC = () => {
         console.log(`[scan:${scanId.slice(0, 8)}] heartbeat`, hb)
       })
       try {
-        const result = await window.api.scanDirectory(dirPath, scanId, parseExcludes(excludeInput))
+        const result = await window.api.scanDirectory(
+          dirPath,
+          scanId,
+          parseExcludes(excludeInput),
+          maxConcurrency
+        )
         setRootData(result)
         setState('done')
         if (debugModeRef.current) console.log(`[scan:${scanId.slice(0, 8)}] done`)
@@ -168,7 +205,7 @@ const App: React.FC = () => {
         setHeartbeat(null)
       }
     },
-    [excludeInput]
+    [excludeInput, maxConcurrency]
   )
 
   const handleCancelScan = useCallback(() => {
@@ -242,6 +279,21 @@ const App: React.FC = () => {
           <h1 className="app-title">HD Scanner</h1>
         </div>
         <div className="header-actions">
+          <div
+            className="workers-control"
+            title="Maximum number of filesystem operations the scanner runs at once. Lower this if scanning makes your system unresponsive; raising it can speed up scans on fast drives. Takes effect immediately, even mid-scan."
+          >
+            <label htmlFor="workers-range">⚙️ Workers</label>
+            <input
+              id="workers-range"
+              type="range"
+              min={MIN_CONCURRENCY}
+              max={MAX_CONCURRENCY}
+              value={maxConcurrency}
+              onChange={(e) => handleConcurrencyChange(Number(e.target.value))}
+            />
+            <span className="workers-value">{maxConcurrency}</span>
+          </div>
           <button
             className={`btn btn-secondary${debugMode ? ' btn-debug-active' : ''}`}
             onClick={handleToggleDebug}
@@ -410,6 +462,10 @@ const App: React.FC = () => {
           <div className="debug-panel-row">
             <span>Active ops</span>
             <span>{heartbeat.activeOps}</span>
+          </div>
+          <div className="debug-panel-row">
+            <span>Worker cap</span>
+            <span>{maxConcurrency}</span>
           </div>
           <div className="debug-panel-row debug-panel-path" title={heartbeat.lastPath}>
             <span>Last path</span>

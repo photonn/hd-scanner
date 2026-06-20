@@ -22,10 +22,18 @@ const api = {
 
   listDrives: (): Promise<string[]> => ipcRenderer.invoke('fs:listDrives'),
 
-  scanDirectory: (dirPath: string, scanId: string, excludes: string[]): Promise<FolderNode> =>
-    ipcRenderer.invoke('fs:scanDirectory', dirPath, scanId, excludes),
+  scanDirectory: (
+    dirPath: string,
+    scanId: string,
+    excludes: string[],
+    maxConcurrency: number
+  ): Promise<FolderNode> =>
+    ipcRenderer.invoke('fs:scanDirectory', dirPath, scanId, excludes, maxConcurrency),
 
   cancelScan: (scanId: string): Promise<void> => ipcRenderer.invoke('fs:cancelScan', scanId),
+
+  setScanConcurrency: (scanId: string, maxConcurrency: number): Promise<void> =>
+    ipcRenderer.invoke('fs:setScanConcurrency', scanId, maxConcurrency),
 
   setDebugMode: (enabled: boolean): Promise<void> =>
     ipcRenderer.invoke('fs:setDebugMode', enabled),
